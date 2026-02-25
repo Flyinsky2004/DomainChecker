@@ -1,0 +1,18 @@
+# Tech / AI 类域名示例
+# 每行一个域名，支持 # 注释行
+
+cloudstackio.de
+aibuilderlab.de
+devtoolbox.de
+codespacer.de
+dataflowly.de
+mlpipelines.de
+apigatewayhub.de
+microservicehub.de
+serverlesslab.de
+containerdeploy.de
+vectordbcloud.de
+llamainfra.de
+promptforge.de
+tokenflow.de
+neuralops.de

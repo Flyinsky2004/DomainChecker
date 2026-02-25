@@ -1,0 +1,22 @@
+# 品牌化短域名示例
+
+qvoxly.de
+zybrax.de
+nexlify.de
+votixapp.de
+fluxrly.de
+kryptly.de
+syncably.de
+zephyrx.de
+luminary.de
+vaultron.de
+glyphly.de
+nebulix.de
+orbitly.de
+prismatix.de
+quantex.de
+
+# 测试已知被注册的域名（用于验证功能）
+google.de
+github.de
+openai.de
