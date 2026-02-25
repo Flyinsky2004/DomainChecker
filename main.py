@@ -16,6 +16,7 @@ Domain Availability Checker
 import os
 import csv
 import asyncio
+import collections
 import aiohttp
 from datetime import datetime
 from pathlib import Path
@@ -49,12 +50,69 @@ GODADDY_BASE_URL   = (
     else "https://api.ote-godaddy.com"
 )
 
+# 频率限制（可在 .env 中配置，0 = 不限制）
+# RATE_UNIT 支持: second（每秒）/ minute（每分钟）
+try:
+    RATE_LIMIT = int(os.environ.get("RATE_LIMIT", "60"))
+except ValueError:
+    RATE_LIMIT = 60
+RATE_UNIT = os.environ.get("RATE_UNIT", "minute").strip().lower()
+if RATE_UNIT not in ("second", "minute"):
+    RATE_UNIT = "minute"
+
 # CSV 字段顺序
 FIELDNAMES = [
     "domain", "tld", "available",
     "registrar", "expiry_date", "domain_status",
     "method", "error", "checked_at",
 ]
+
+
+# ── 频率限制器 ──────────────────────────────────────────────────────────────────
+
+class RateLimiter:
+    """滑动窗口异步频率限制器。
+    保证在任意 `period` 秒内发出的请求不超过 `max_calls` 次。
+    在 asyncio 单线程环境下线程安全。
+    """
+
+    def __init__(self, max_calls: int, period: float) -> None:
+        self._max_calls = max_calls
+        self._period    = period                                    # 窗口长度（秒）
+        self._calls: collections.deque[float] = collections.deque()  # 请求时间戳
+        self._lock = asyncio.Lock()
+
+    async def acquire(self) -> None:
+        """等待直到当前频率窗口内有空位，然后占用一个槽位。"""
+        while True:
+            async with self._lock:
+                now    = asyncio.get_event_loop().time()
+                cutoff = now - self._period
+                # 清除窗口外的旧时间戳
+                while self._calls and self._calls[0] <= cutoff:
+                    self._calls.popleft()
+                if len(self._calls) < self._max_calls:
+                    self._calls.append(now)
+                    return  # 有空位，立即返回
+                # 窗口已满：计算需要等待多久
+                sleep_for = self._calls[0] + self._period - now
+            # 在锁外 sleep，让其他协程可以继续运行
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            # 醒来后重新检查（避免多个协程同时醒来的竞争）
+
+
+class _NoopRateLimiter:
+    """占位用：当 RATE_LIMIT=0 时不做任何限制。"""
+    async def acquire(self) -> None:
+        pass
+
+
+def make_rate_limiter(max_calls: int, unit: str) -> "RateLimiter | _NoopRateLimiter":
+    if max_calls <= 0:
+        return _NoopRateLimiter()
+    period = 1.0 if unit == "second" else 60.0
+    return RateLimiter(max_calls, period)
 
 
 # ── 读取域名 ────────────────────────────────────────────────────────────────────
@@ -232,8 +290,11 @@ async def check_via_godaddy(session: aiohttp.ClientSession, domain: str) -> dict
 
 # ── 并发处理 ─────────────────────────────────────────────────────────────────────
 
-async def process_all(domains: list[str]) -> list[dict]:
-    """使用信号量控制并发，批量检查所有域名。"""
+async def process_all(
+    domains: list[str],
+    rate_limiter: "RateLimiter | _NoopRateLimiter",
+) -> list[dict]:
+    """使用滑动窗口频率限制 + 信号量并发控制，批量检查所有域名。"""
     use_godaddy = bool(GODADDY_API_KEY and GODADDY_API_SECRET)
     checker     = check_via_godaddy if use_godaddy else check_via_rdap
 
@@ -246,7 +307,8 @@ async def process_all(domains: list[str]) -> list[dict]:
     async with aiohttp.ClientSession(connector=connector) as session:
 
         async def worker(idx: int, domain: str):
-            async with semaphore:
+            await rate_limiter.acquire()   # 先等频率槽位
+            async with semaphore:          # 再控制并发上限
                 res = await checker(session, domain)
                 results[idx] = res
                 icon    = {"是": "✓", "否": "✗"}.get(res["available"], "?")
@@ -304,10 +366,16 @@ def main() -> None:
         print("🔍  检查方式: RDAP / rdap.org（免费模式）")
         print("    提示: 在 .env 中配置 GoDaddy API Key 可获得更准确的结果")
     print(f"⚡  并发数  : {CONCURRENCY}")
+    if RATE_LIMIT > 0:
+        unit_zh = "秒" if RATE_UNIT == "second" else "分钟"
+        print(f"🚦  频率限制: {RATE_LIMIT} 次 / {unit_zh}")
+    else:
+        print("🚦  频率限制: 不限制")
     print()
 
+    rate_limiter = make_rate_limiter(RATE_LIMIT, RATE_UNIT)
     start   = datetime.now()
-    results = asyncio.run(process_all(domains))
+    results = asyncio.run(process_all(domains, rate_limiter))
     elapsed = (datetime.now() - start).total_seconds()
 
     print_summary(results, elapsed)
