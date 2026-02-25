@@ -40,6 +40,14 @@ if _env_file.exists():
 
 GODADDY_API_KEY    = os.environ.get("GODADDY_API_KEY", "")
 GODADDY_API_SECRET = os.environ.get("GODADDY_API_SECRET", "")
+# 第一个申请的 Key 是 OTE 测试环境，必须用 api.ote-godaddy.com
+# 申请了 Production Key 后改为 production
+GODADDY_ENV        = os.environ.get("GODADDY_ENV", "ote").lower()
+GODADDY_BASE_URL   = (
+    "https://api.godaddy.com"
+    if GODADDY_ENV == "production"
+    else "https://api.ote-godaddy.com"
+)
 
 # CSV 字段顺序
 FIELDNAMES = [
@@ -172,7 +180,7 @@ async def check_via_godaddy(session: aiohttp.ClientSession, domain: str) -> dict
     result  = _make_result(domain)
     result["method"] = "GoDaddy"
 
-    url     = "https://api.godaddy.com/v1/domains/available"
+    url     = f"{GODADDY_BASE_URL}/v1/domains/available"
     headers = {
         "Authorization": f"sso-key {GODADDY_API_KEY}:{GODADDY_API_SECRET}",
         "Accept":        "application/json",
@@ -191,12 +199,20 @@ async def check_via_godaddy(session: aiohttp.ClientSession, domain: str) -> dict
                 result["available"] = "是" if available else "否"
                 if not definitive:
                     result["error"] = "结果不确定（建议手动验证）"
+            elif resp.status == 400:
+                result["available"] = "未知"
+                msg = data.get("message", "")
+                # 400 最常见原因: OTE Key 用了生产 URL，或 Key/Secret 填错
+                result["error"] = f"400 Bad Request: {msg or str(data)[:80]}"
             elif resp.status == 401:
                 result["available"] = "未知"
-                result["error"]     = "API Key 无效，请检查 .env 文件"
+                result["error"]     = "401 Key/Secret 无效，请检查 .env 文件"
+            elif resp.status == 403:
+                result["available"] = "未知"
+                result["error"]     = "403 无权限（OTE Key 请将 GODADDY_ENV=ote）"
             elif resp.status == 429:
                 result["available"] = "未知"
-                result["error"]     = "超出 API 频率限制"
+                result["error"]     = "429 超出 API 频率限制，稍后重试"
             elif resp.status == 422:
                 result["available"] = "未知"
                 result["error"]     = data.get("message", "不支持的 TLD")
@@ -276,9 +292,16 @@ def main() -> None:
     domains = load_domains()
 
     use_godaddy = bool(GODADDY_API_KEY and GODADDY_API_SECRET)
-    method_name = "GoDaddy API（精准模式）" if use_godaddy else "RDAP / rdap.org（免费模式）"
-    print(f"🔍  检查方式: {method_name}")
-    if not use_godaddy:
+    if use_godaddy:
+        env_label   = "OTE 测试环境" if GODADDY_ENV != "production" else "生产环境"
+        method_name = f"GoDaddy API（{env_label}）"
+        print(f"🔍  检查方式: {method_name}")
+        print(f"    端点    : {GODADDY_BASE_URL}")
+        if GODADDY_ENV != "production":
+            print("    ⚠️  OTE 环境仅供测试，域名可用性数据为模拟值")
+            print("    ℹ️  需要真实结果请申请 Production Key 并设置 GODADDY_ENV=production")
+    else:
+        print("🔍  检查方式: RDAP / rdap.org（免费模式）")
         print("    提示: 在 .env 中配置 GoDaddy API Key 可获得更准确的结果")
     print(f"⚡  并发数  : {CONCURRENCY}")
     print()
